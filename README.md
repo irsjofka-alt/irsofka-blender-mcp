@@ -14,7 +14,7 @@ engine (MCP client) ── stdio JSON-RPC ──> server.py ── HTTP/newline 
 ```
 
 - **License**: Business Source License 1.1 for the **station layer** (this repo's own files), Licensor
-  PT IRSofka Data Teknologi, Change License MIT after four years per version. `upstream/` is **not**
+  PT IRSofka Data Teknologi, Change License the Apache License, Version 2.0 after four years per version. `upstream/` is **not**
   covered by that claim: it stays MIT and its notices are retained — see `NOTICE` and `LICENSE`'s
   `Licensed Work` parameter.
 - **Provenance**: `UPSTREAM` records the exact base (`7a0373ec9199183cb460068c4f96aed9c579fb4f`,
