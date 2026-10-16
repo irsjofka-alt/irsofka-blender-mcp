@@ -430,18 +430,21 @@ def selftest() -> int:
           deps["ok"] and not deps["unparseable_files"], json.dumps(deps)[:200])
 
     # 17. Proof that the check above is not decoration: the same audit against a fixture that declares
-    #     a library nothing imports and forgets one everything imports. Both directions must be named.
+    #     a library nothing imports, omits one everything imports, and points its package-dir at a
+    #     directory that is not there. All three must be named, and `ok` must be false.
     with tempfile.TemporaryDirectory() as td:
         fx = Path(td)
         (fx / "a.py").write_text("import mcp\nimport numpy\n")
         (fx / "pyproject.toml").write_text(
-            '[project]\nname = "fx"\ndependencies = ["httpx>=0.27", "mcp>=1"]\n')
+            '[project]\nname = "fx"\ndependencies = ["httpx>=0.27", "mcp>=1"]\n'
+            '[tool.setuptools]\npackage-dir = {fx = "gone/src/fx"}\npackages = ["fx"]\n')
         fx_report = deps_honesty.audit(fx)
-        check("audit dependensi MENOLAK fixture yang kelebihan dan kurang deklarasi",
+        check("audit dependensi MENOLAK fixture yang kelebihan, kurang, dan menunjuk path kosong",
               fx_report["declared_but_not_imported"] == ["httpx"]
               and fx_report["imported_but_not_declared"] == ["numpy"]
+              and fx_report["missing_packaging_paths"] == ["gone/src/fx", "gone/src/fx/__init__.py"]
               and fx_report["ok"] is False,
-              json.dumps(fx_report)[:200])
+              json.dumps(fx_report)[:220])
 
     # 18. Self-referential check count verification: README count matches executed checks
     readme_text = (REPO / "README.md").read_text(errors="replace") if (REPO / "README.md").is_file() else ""

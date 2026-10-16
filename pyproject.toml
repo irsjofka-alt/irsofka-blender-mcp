@@ -38,12 +38,14 @@ Issues = "https://irsofka.co.id"
 Support = "admin@irsofka.co.id"
 
 # There is no installable package in this tree. The old `[tool.setuptools]` block pointed at the
-# deleted `upstream/` package; with that gone there is nothing to install, and a wheel that installs
-# no module is a quieter failure than no wheel at all. `py-modules = []` is kept deliberately:
+# deleted `upstream/src/blender_mcp`, which is the kind of error an import scan cannot see and a
+# build finds first — `tools/deps_honesty.py` now names any path the config references that is not
+# there. With nothing left to package, `packages` and `py-modules` are declared empty on purpose:
 # without an explicit empty list setuptools auto-discovers the root files and would put modules
 # named `server` and `vram` — two of the most collision-prone names in Python — at the top level of
-# site-packages. The supported way to run this is `python3 server.py` from a checkout, which is also
-# what the workstation's MCP registration points at.
+# site-packages. What an empty build actually produces was not measured here (this machine has no
+# importable setuptools), so no claim is made about it; the supported way to run this work is
+# `python3 server.py` from a checkout, which is also what the workstation's MCP registration uses.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"

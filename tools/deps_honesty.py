@@ -8,11 +8,14 @@ plus a `package-dir` still pointing into that deleted `upstream/`. A reviewer ha
 against the file list by hand to notice. This makes that comparison a command, so the defect class is
 closed rather than fixed.
 
-Two directions are checked, because each fails differently:
+Three directions are checked, because each fails differently:
   * declared but not imported  -> the recipient installs a library for code that is not there, and the
     claim about what this work depends on is untrue on its face;
   * imported but not declared  -> `pip` installs nothing for it and the server raises ImportError at
-    first use, which is the failure the old comment called "an install that succeeds and then dies".
+    first use, which is the failure the old comment called "an install that succeeds and then dies";
+  * a path named by the setuptools config that does not exist in the tree — invisible to an import
+    scan, because nothing imports a `package-dir`; it is where the build looks, and it is the line
+    that made this repository's build fail after `upstream/` was deleted.
 
 Names this repository or the workstation provides by path (`sys.path.insert` to
 `$AI_STATION_HOME/tools`) are excluded from both lists: they are not PyPI distributions, and a
@@ -114,20 +117,45 @@ def declared_names(root: Path) -> set[str]:
     return out
 
 
+def missing_packaging_paths(root: Path) -> list[str]:
+    """Every path the setuptools config names that does not exist in the tree.
+
+    This is the half of the manifest the dependency list cannot see. The audit found
+    `package-dir = {"blender_mcp" = "upstream/src/blender_mcp"}` still declared after `upstream/` was
+    deleted: the dependency list was wrong too, but this line is what made the BUILD fail, and it is
+    invisible to an import scan because the path is never imported — it is where setuptools looks.
+    """
+    data = tomllib.loads((root / "pyproject.toml").read_text())
+    st = data.get("tool", {}).get("setuptools", {}) or {}
+    refs: list[str] = []
+    pkg_dir = st.get("package-dir", {}) or {}
+    for _name, path in pkg_dir.items():
+        refs.append(str(path))
+    for mod in st.get("py-modules", []) or []:
+        refs.append(f"{mod}.py")
+    for pkg in st.get("packages", []) or []:
+        here = pkg_dir.get(pkg, pkg.replace(".", "/"))
+        refs.append(str(Path(here) / "__init__.py") if here else pkg)
+    return sorted({r for r in refs if r and not (root / r).exists()})
+
+
 def audit(root: Path | None = None) -> dict:
     root = root or repo_root()
     known = tracked_modules(root)
-    imported = {n for n in imported_names(root) if n not in known and not n.startswith("!")}
-    unparseable = sorted(n.split(":", 1)[1] for n in imported_names(root) if n.startswith("!"))
+    imports = imported_names(root)
+    imported = {n for n in imports if n not in known and not n.startswith("!")}
+    unparseable = sorted(n.split(":", 1)[1] for n in imports if n.startswith("!"))
     declared = declared_names(root)
     # A distribution named `zope.interface` imports as `zope`; first segment is the import name.
     declared_imports = {n.split(".")[0] for n in declared}
+    paths = missing_packaging_paths(root)
     return {
-        "ok": not unparseable and imported == declared_imports,
+        "ok": not unparseable and not paths and imported == declared_imports,
         "declared": sorted(declared),
         "imported_third_party": sorted(imported),
         "declared_but_not_imported": sorted(declared_imports - imported),
         "imported_but_not_declared": sorted(imported - declared_imports),
+        "missing_packaging_paths": paths,
         "unparseable_files": unparseable,
     }
 
