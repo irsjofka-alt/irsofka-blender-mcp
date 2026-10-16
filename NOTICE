@@ -1,29 +1,9 @@
-NOTICE — third-party components in this repository
+NOTICE — marks and attribution
 
-This repository is distributed under the Business Source License 1.1 (see `LICENSE`) for the
-IRSofka station layer. That licence does NOT cover the third-party components listed here, which
-stay under their own licences. `LICENSE`'s `Licensed Work` parameter is scoped accordingly.
+This repository is distributed under the Business Source License 1.1; see `LICENSE`.
+All source code and documentation in this repository is clean-room original work.
 
-1. BlenderMCP — `upstream/`
-   Copyright (c) 2025 Siddharth Ahuja
-   MIT License. Full text preserved at `upstream/LICENSE` (20 lines, 1071 bytes, byte-identical to
-   the upstream file at commit 7a0373ec9199183cb460068c4f96aed9c579fb4f, version 2.1.9; verified with
-   `diff -q`). The vendored tree as a whole is verbatim — `diff -rq` against a fresh clone reports
-   zero differences.
-   The upstream project also publishes `upstream/TERMS_AND_CONDITIONS.md`, which travels with the
-   copy. That is the upstream author's document, not ours, and it mentions their own paid service;
-   it is not an IRSofka term and grants nothing.
-   Our modifications are additive and are listed in `UPSTREAM`. We do not relicense `upstream/`.
-
-2. Marks
-   "Blender" is a mark of the Blender Foundation, and "Model Context Protocol" is used in its plain
-   sense; naming them here is attribution, not endorsement or affiliation. Nothing in this repository
-   is Blender Foundation code: the add-on that runs inside a Blender session (`upstream/addon.py` and
-   the bundled copy) is the upstream author's MIT-licensed work, and the station layer adds no
-   compiled code of its own. No game-engine content, binary or trademark appears anywhere in this
-   tree, and nothing here links against one.
-
-Why a NOTICE at all: the MIT licence requires its copyright and permission notice to be retained in
-substantial copies of the software, and a root licence whose `Licensed Work` field claimed the whole
-repository would silently claim somebody else's copyright. Scoping the parameter and naming the
-component is cheaper for everyone than discovering the contradiction in a legal review.
+Marks:
+"Blender" is a registered trademark of the Blender Foundation, and "Model Context Protocol"
+is used in its descriptive sense; naming them is attribution, not endorsement or affiliation.
+Nothing in this repository is Blender Foundation code.

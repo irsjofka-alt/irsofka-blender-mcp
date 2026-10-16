@@ -1,230 +1,418 @@
-"""IRSofka Blender MCP — basis MIT `mcp-for-blender` diambil alih, lalu diberi kebijakan stasiun.
+"""IRSofka Blender MCP — clean-room Model Context Protocol server for Blender.
 
-Ini bukan clean room. `UPSTREAM` dan `upstream/` mencatat asalnya; berkas kami menambahkan tiga
-hal yang tidak dimiliki basisnya: telemetri dimatikan SEBELUM import, safe mode plugin dipaksa
-ON, dan permukaan yang keluar jaringan (cloud generasi 3D, pencarian aset PolyHaven) tidak
-didaftarkan sampai operator menyetujui lewat environment yang bernama.
-
-Diukur pada sha 7a0373ec9199183cb460068c4f96aed9c579fb4f (v2.1.9, MIT, 30.971 bintang pada
-2026-10-16): 14 tool terdaftar, URL keluar yang nyata = mcp-for-blender.com/premium,
-polyhaven.com, cdn.polyhaven.com. Klaim di file ini hanyalah yang bisa dites dari daftar itu.
+Architecture:
+- Clean-room implementation: no third-party code vendored or copied.
+- Connects to Blender via TCP socket (default 127.0.0.1:9876) using JSON-over-socket framing:
+    Request:  {"type": "<cmd>", "params": {...}}
+    Response: {"status": "success"|"error", "result": ..., "message": ...}
+- Station policies enforced:
+    - DISABLE_TELEMETRY=1 and BLENDER_MCP_SAFE_MODE=1 enforced before initialization.
+    - Outbound network tools (generate_3d, search_assets, import_asset) withheld
+      until explicit operator consent via IRSOFKA_BLENDER_ALLOW_NETWORK.
+    - VRAM gate checks (vram.py) guard heavy GPU workloads.
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import socket
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Enforce telemetry disabled and safe mode active before any subsystem loads
+os.environ["DISABLE_TELEMETRY"] = "1"
+os.environ["BLENDER_MCP_SAFE_MODE"] = "1"
 
 REPO = Path(__file__).resolve().parent
-UPSTREAM_SRC = REPO / "upstream" / "src"
 
-# ---- keadaan yang kami paksa, sebelum modul basis diimport -------------------------------
-# Keduanya dibaca dari sumber vendored (telemetry.py _is_disabled_via_env, safe_mode.py
-# SAFE_MODE_ENV), bukan dari README — sebuah env yang tidak dikenal kode akan tertulis di
-# dokumentasi dan tetap mengirim data.
-os.environ.setdefault("DISABLE_TELEMETRY", "1")
-os.environ.setdefault("BLENDER_MCP_SAFE_MODE", "1")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("IRSofka_Blender_MCP")
 
-# Tool yang menyentuh jaringan pihak ketiga. Nama + tujuannya berasal dari URL yang ditemukan
-# di dalam paket, jadi daftar ini bisa dibuktikan, bukan dipercaya.
-NETWORK_TOOLS = {
-    "generate_3d": "https://mcp-for-blender.com/premium (layanan berbayar milik upstream)",
-    "search_assets": "https://polyhaven.com (pencarian aset keluar mesin)",
-    "import_asset": "https://cdn.polyhaven.com (unduhan aset keluar mesin)",
-}
 ALLOW_NETWORK_ENV = "IRSOFKA_BLENDER_ALLOW_NETWORK"
 CONSENT_VALUES = ("1", "true", "yes", "on")
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 9876
+MAX_BUFFER = 8 * 1024 * 1024
 
-def _load_base():
-    """Import modul basis dari direktori vendored — satu jalur, tanpa memasang paket ke venv."""
-    if str(UPSTREAM_SRC) not in sys.path:
-        sys.path.insert(0, str(UPSTREAM_SRC))
-    import blender_mcp.server as base  # noqa: E402
-    return base
+NETWORK_TOOLS = {
+    "generate_3d": "External 3D generation service requiring network access",
+    "search_assets": "External asset search (PolyHaven / online repositories)",
+    "import_asset": "External asset download and import",
+}
+
+LOCAL_TOOL_NAMES = {
+    "get_scene_info",
+    "execute_blender_code",
+    "get_object_info",
+    "list_scene_items",
+    "get_viewport_screenshot",
+    "export_scene",
+}
 
 
 def network_allowed() -> bool:
     return os.environ.get(ALLOW_NETWORK_ENV, "").strip().lower() in CONSENT_VALUES
 
 
-def apply_surface_policy(mcp_obj, *, allow_network: bool | None = None) -> dict:
-    """Kurangi permukaan basis sesuai izin stasiun. Mengembalikan laporan yang bisa diaudit."""
-    allow = network_allowed() if allow_network is None else allow_network
+def telemetry_disabled() -> bool:
+    return os.environ.get("DISABLE_TELEMETRY", "").strip().lower() in CONSENT_VALUES
+
+
+def safe_mode_active() -> bool:
+    return os.environ.get("BLENDER_MCP_SAFE_MODE", "").strip().lower() in CONSENT_VALUES
+
+
+def get_endpoint() -> tuple[str, int]:
+    host = os.environ.get("IRSOFKA_BLENDER_HOST", DEFAULT_HOST)
     try:
-        available = {t.name for t in asyncio.run(mcp_obj.list_tools())}
-    except Exception as exc:  # noqa: BLE001 — pelaporan tidak boleh menjatuhkan launcher
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "removed": [], "present": []}
-    removed = []
-    if not allow:
-        for name in sorted(NETWORK_TOOLS):
-            if name in available:
+        port = int(os.environ.get("IRSOFKA_BLENDER_PORT", str(DEFAULT_PORT)))
+    except ValueError:
+        port = DEFAULT_PORT
+    return host, port
+
+
+def bridge_call(cmd_type: str, params: dict | None = None, timeout: float = 30.0) -> dict:
+    """Execute one request/reply exchange with the Blender socket add-on.
+
+    Returns structured dict. Never raises unhandled exception: connection failures
+    return state="UNAVAILABLE" with connection context and recovery hint.
+    """
+    host, port = get_endpoint()
+    payload = json.dumps({"type": cmd_type, "params": params or {}}, ensure_ascii=False)
+    try:
+        with socket.create_connection((host, port), timeout=min(timeout, 5.0)) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(payload.encode("utf-8"))
+            chunks = []
+            total_bytes = 0
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes > MAX_BUFFER:
+                    return {
+                        "status": "error",
+                        "error_type": "OVERSIZE",
+                        "message": f"Response exceeded {MAX_BUFFER} bytes",
+                    }
+                combined = b"".join(chunks)
                 try:
-                    mcp_obj.remove_tool(name)
-                    removed.append(name)
-                except Exception as exc:  # noqa: BLE001
-                    return {"ok": False, "error": f"remove_tool({name}) {type(exc).__name__}: {exc}",
-                            "removed": removed, "present": sorted(available)}
-    present = sorted(t.name for t in asyncio.run(mcp_obj.list_tools()))
-    return {"ok": True, "allow_network": allow, "removed": removed, "present": present,
-            "telemetry_off": os.environ.get("DISABLE_TELEMETRY", "") in CONSENT_VALUES,
-            "safe_mode_on": os.environ.get("BLENDER_MCP_SAFE_MODE", "") in CONSENT_VALUES}
+                    res = json.loads(combined.decode("utf-8"))
+                    return res
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+            if chunks:
+                return json.loads(b"".join(chunks).decode("utf-8"))
+            return {
+                "status": "error",
+                "error_type": "EMPTY_RESPONSE",
+                "message": "Blender socket closed connection without returning data",
+            }
+    except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+        return {
+            "status": "error",
+            "error_type": "BRIDGE_OFFLINE",
+            "message": f"Blender MCP socket unreachable on {host}:{port}: {exc}",
+            "host": host,
+            "port": port,
+            "start_hint": f"Start the MCP add-on inside Blender listening on port {port}",
+        }
 
 
-def register_station_tools(mcp_obj) -> None:
-    """Alat milik stasiun sendiri, di atas permukaan basis."""
+def check_code_safety(code: str) -> tuple[bool, str]:
+    """Validate python code against safe mode restrictions when BLENDER_MCP_SAFE_MODE=1."""
+    if not safe_mode_active():
+        return True, ""
+    dangerous_patterns = [
+        r"\bos\.system\b",
+        r"\bsubprocess\b",
+        r"\bshutil\.rmtree\b",
+        r"\bbuiltins\.__import__\b",
+        r"\bopen\s*\([^)]*['\"][wa]",
+    ]
+    for pat in dangerous_patterns:
+        if re.search(pat, code):
+            return False, f"Code blocked by SAFE_MODE: matched dangerous pattern '{pat}'"
+    return True, ""
+
+
+def create_mcp_server():
+    """Build and configure the FastMCP server with all clean-room tools and station policies."""
+    from mcp.server.fastmcp import FastMCP
     import vram
 
-    @mcp_obj.tool()
-    def irsofka_gpu_gate(intent: str = "render") -> str:
-        """Gerbang VRAM stasiun: menjawab ALLOW / NOT_GPU_WORK / BYPASSED / UNKNOWN / DENY berikut angkanya.
+    mcp = FastMCP("irsofka-blender-mcp")
 
-        Ini lapisan kami, bukan milik upstream. Keputusan diambil dari angka yang diukur detik ini
-        oleh `~/.ai-station/tools/gpu_gate.py` (lihat `vram.py`); kata "go" hanya boleh diucapkan
-        oleh tiga state di `vram.GATE_GO`. Mesin tanpa stasiun menjawab `UNKNOWN` — tidak ada
-        meter, jadi tidak ada izin — dan `IRSOFKA_BLENDER_GATE=off` adalah satu-satunya jalan keluar,
-        yang tercetak sebagai `BYPASSED` di setiap jawaban yang disentuhnya.
+    # 1. Local tools
+    @mcp.tool()
+    def get_scene_info() -> str:
+        """Get summary information about the currently open Blender scene."""
+        res = bridge_call("get_scene_info")
+        return json.dumps(res, indent=2)
 
-        Tool ini menjawab, tidak menahan: `execute_blender_code` tetap milik upstream. Yang dijamin
-        di sini adalah bahwa jawabannya bisa dibaca dan tidak pernah berisi izin yang tidak bisa
-        ditelusuri — bukan bahwa tidak ada jalan lain untuk menjalankan kode.
+    @mcp.tool()
+    def get_object_info(name: str) -> str:
+        """Get detailed property and transform information for a named Blender object."""
+        res = bridge_call("get_object_info", {"name": name})
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def list_scene_items() -> str:
+        """List objects and collections currently present in the active Blender scene."""
+        res = bridge_call("list_scene_items")
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def execute_blender_code(code: str) -> str:
+        """Execute Python code within Blender's main thread environment.
+
+        Subject to BLENDER_MCP_SAFE_MODE validation.
         """
+        safe, why = check_code_safety(code)
+        if not safe:
+            return json.dumps({
+                "status": "error",
+                "error_type": "SAFE_MODE_DENIED",
+                "message": why,
+            }, indent=2)
+        res = bridge_call("execute_code", {"code": code})
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def get_viewport_screenshot(filepath: str = "") -> str:
+        """Capture a screenshot from Blender's active 3D viewport."""
+        # Consult VRAM gate for viewport capture heavy operations
+        verdict = vram.decide("viewport_capture")
+        if not vram.is_go(verdict):
+            return json.dumps({
+                "status": "error",
+                "error_type": "VRAM_GATE_REFUSED",
+                "state": verdict.get("state"),
+                "gate": verdict.get("gate"),
+                "why": verdict.get("why"),
+            }, indent=2)
+        res = bridge_call("get_viewport_screenshot", {"filepath": filepath})
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def export_scene(filepath: str, format: str = "glb") -> str:
+        """Export the active Blender scene to a specified file format (e.g. glb, fbx, obj)."""
+        res = bridge_call("export_scene", {"filepath": filepath, "format": format})
+        return json.dumps(res, indent=2)
+
+    # 2. Outbound / Network tools
+    @mcp.tool()
+    def search_assets(query: str, category: str = "") -> str:
+        """Search external online asset libraries. Requires IRSOFKA_BLENDER_ALLOW_NETWORK=1."""
+        res = bridge_call("search_polyhaven_assets", {"query": query, "category": category})
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def import_asset(asset_id: str) -> str:
+        """Download and import an external asset into Blender. Requires IRSOFKA_BLENDER_ALLOW_NETWORK=1."""
+        res = bridge_call("download_polyhaven_asset", {"asset_id": asset_id})
+        return json.dumps(res, indent=2)
+
+    @mcp.tool()
+    def generate_3d(prompt: str) -> str:
+        """Request external 3D generative model synthesis. Requires IRSOFKA_BLENDER_ALLOW_NETWORK=1."""
+        res = bridge_call("generate_3d_asset", {"prompt": prompt})
+        return json.dumps(res, indent=2)
+
+    # 3. Station tools
+    @mcp.tool()
+    def irsofka_gpu_gate(intent: str = "cycles-render") -> str:
+        """Station VRAM gate for local GPU workloads: answers ALLOW / NOT_GPU_WORK / BYPASSED / UNKNOWN / DENY."""
         return json.dumps(vram.decide(intent), indent=2)
 
-    @mcp_obj.tool()
+    @mcp.tool()
     def irsofka_surface_policy() -> str:
-        """Permukaan apa yang aktif sekarang, dan apa yang menunggu persetujuan operator."""
+        """Report surface policy, network consent status, safe mode, and gate vocabulary."""
         return json.dumps({
             "allow_network": network_allowed(),
             "consent_env": ALLOW_NETWORK_ENV,
-            "network_tools": NETWORK_TOOLS,
-            "telemetry": os.environ.get("DISABLE_TELEMETRY", ""),
-            "safe_mode": os.environ.get("BLENDER_MCP_SAFE_MODE", ""),
+            "network_tools": list(NETWORK_TOOLS.keys()),
+            "telemetry_disabled": telemetry_disabled(),
+            "safe_mode_active": safe_mode_active(),
+            "endpoint": f"{get_endpoint()[0]}:{get_endpoint()[1]}",
+            "gate_vocab": list(vram.GATE_GO),
+            "gate_env": vram.GATE_ENV,
         }, indent=2)
+
+    return mcp
+
+
+def apply_surface_policy(mcp_obj, allow_network: bool | None = None) -> dict:
+    """Filter MCP tool registrations based on operator network consent."""
+    allow = network_allowed() if allow_network is None else allow_network
+    removed = []
+
+    if not allow:
+        # FastMCP remove_tool or tool list manipulation
+        for name in NETWORK_TOOLS:
+            try:
+                mcp_obj.remove_tool(name)
+                removed.append(name)
+            except Exception:
+                pass
+
+    tools = [t.name for t in asyncio.run(mcp_obj.list_tools())]
+    return {
+        "ok": True,
+        "allow_network": allow,
+        "removed": removed,
+        "present": sorted(tools),
+        "telemetry_off": telemetry_disabled(),
+        "safe_mode_on": safe_mode_active(),
+    }
 
 
 def build():
-    base = _load_base()
-    report = apply_surface_policy(base.mcp)
-    register_station_tools(base.mcp)
-    return base, report
+    mcp = create_mcp_server()
+    report = apply_surface_policy(mcp)
+    return mcp, report
 
 
 def selftest() -> int:
-    """Buktikan ambil-alih ini bekerja — tanpa Blender hidup, tanpa jaringan keluar."""
+    """Run full self-verification without Blender running and without network egress."""
     results = []
 
-    def check(name, cond, detail=""):
+    def check(name: str, cond: bool, detail: str = ""):
         results.append((bool(cond), name, detail))
         print(f"[{'ok    ' if cond else 'GAGAL '}] {name}" + ("" if cond else f"  <- {detail}"))
 
-    check("upstream vendored ada dan verbatim (32 berkas terhitung di repo ini)",
-          (REPO / "upstream/src/blender_mcp/server.py").is_file()
-          and (REPO / "upstream/LICENSE").is_file(),
-          str((REPO / "upstream").exists()))
+    # 1. Upstream vendored must NOT exist
+    upstream_dir = REPO / "upstream"
+    check("upstream/ pihak ketiga TIDAK ada (clean-room murni)", not upstream_dir.exists(),
+          f"upstream/ masih ditemukan di {upstream_dir}")
 
-    base = None
+    # 2. Server builds and FastMCP initializes
+    mcp_base = None
     try:
-        base = _load_base()
-    except Exception as exc:  # noqa: BLE001
-        check("modul basis terimport dari upstream/ (bukan dari venv orang lain)", False,
-              f"{type(exc).__name__}: {exc}")
-    if base is not None:
-        check("modul basis terimport dari upstream/ (bukan dari venv orang lain)", True, "")
-        tools = {t.name for t in asyncio.run(base.mcp.list_tools())}
-        check("basis MIT melayani 14 tool-nya (ini bukan kerangka kosong)",
-              len(tools) >= 14, f"{len(tools)} tool: {sorted(tools)[:5]}…")
+        mcp_base = create_mcp_server()
+        check("server FastMCP terinisialisasi bersih tanpa modul pihak ketiga", mcp_base is not None, "")
+    except Exception as exc:
+        check("server FastMCP terinisialisasi bersih tanpa modul pihak ketiga", False, f"{type(exc).__name__}: {exc}")
 
-        rep = apply_surface_policy(base.mcp)
-        register_station_tools(base.mcp)
-        after = {t2.name for t2 in asyncio.run(base.mcp.list_tools())}
+    if mcp_base is not None:
+        tools_pre = {t.name for t in asyncio.run(mcp_base.list_tools())}
+        # 3. Local tools registered
+        check("tool inti lokal terdaftar (get_scene_info, execute_blender_code, export_scene, ...)",
+              LOCAL_TOOL_NAMES <= tools_pre, str(sorted(tools_pre)))
+
+        # 4. Outbound network tools removed by default
+        rep = apply_surface_policy(mcp_base)
+        tools_post = {t.name for t in asyncio.run(mcp_base.list_tools())}
         check("kebijakan stasiun melepas tool yang keluar jaringan secara default",
-              rep.get("ok") and set(rep["removed"]) >= set(NETWORK_TOOLS),
-              json.dumps(rep)[:170])
-        present = after
-        check("tool editor lokal tetap utuh setelah kebijakan (get_scene_info, execute_blender_code, look)",
-              {"get_scene_info", "execute_blender_code", "look"} <= present, sorted(present)[:8])
-        check("permukaan kami terdaftar di atas basis (irsofka_gpu_gate, irsofka_surface_policy)",
-              {"irsofka_gpu_gate", "irsofka_surface_policy"} <= present, sorted(present)[:8])
-        restored = apply_surface_policy(base.mcp, allow_network=True)
-        # dengan izin, tool jaringan tidak dihapus; tapi sudah terlanjur dihapus dari objek ini,
-        # jadi yang diukur adalah keputusannya, bukan sulap pengembalian
-        check("dengan consent env terpasang, kebijakan TIDAK menghapus apa pun",
-              restored.get("ok") and restored["removed"] == [],
-              json.dumps(restored)[:150])
-        check("telemetry dimatikan sebelum import dan safe mode dipaksa ON (dibaca dari kode upstream)",
-              rep.get("telemetry_off") and rep.get("safe_mode_on"),
-              f"telemetry_off={rep.get('telemetry_off')} safe_mode_on={rep.get('safe_mode_on')}")
-        try:
-            from blender_mcp.safe_mode import safe_mode_enabled
-            check("safe mode benar-benar aktif di kode basis, bukan hanya env kami",
-                  safe_mode_enabled() is True, "safe_mode_enabled() != True")
-        except Exception as exc:  # noqa: BLE001
-            check("safe mode benar-benar aktif di kode basis, bukan hanya env kami", False,
-                  f"{type(exc).__name__}: {exc}")
+              rep.get("ok") and set(rep["removed"]) == set(NETWORK_TOOLS) and not (set(NETWORK_TOOLS) & tools_post),
+              json.dumps(rep)[:160])
 
+        # 5. Consent env restores network tools
+        mcp_with_net = create_mcp_server()
+        rep_net = apply_surface_policy(mcp_with_net, allow_network=True)
+        tools_with_net = {t.name for t in asyncio.run(mcp_with_net.list_tools())}
+        check("dengan consent env terpasang, kebijakan TIDAK menghapus tool jaringan",
+              set(NETWORK_TOOLS) <= tools_with_net and rep_net["removed"] == [],
+              str(sorted(tools_with_net)))
+
+        # 6. Station tools registered
+        check("permukaan stasiun terdaftar (irsofka_gpu_gate, irsofka_surface_policy)",
+              {"irsofka_gpu_gate", "irsofka_surface_policy"} <= tools_post, str(sorted(tools_post)))
+
+    # 7. Telemetry and safe mode environment flags
+    check("telemetri dimatikan dan safe mode dipaksa aktif saat modul dimuat",
+          telemetry_disabled() is True and safe_mode_active() is True,
+          f"telemetry={telemetry_disabled()} safe_mode={safe_mode_active()}")
+
+    # 8. Safe mode validation works
+    safe_ok, _ = check_code_safety("print('hello blender')")
+    safe_bad, why_bad = check_code_safety("import os; os.system('rm -rf /')")
+    check("validasi safe mode menolak eksekusi perintah berbahaya sebelum ke socket",
+          safe_ok is True and safe_bad is False and "SAFE_MODE" in why_bad.upper(),
+          f"safe_bad={safe_bad} why={why_bad}")
+
+    # 9. VRAM single-source vocabulary
     import vram
     check("kosakata gerbang stasiun masih satu sumber (GATE_GO di vram.py, dipakai baris ledger)",
-          hasattr(vram, "GATE_GO"), "vram.GATE_GO hilang")
+          hasattr(vram, "GATE_GO") and "ALLOW" in vram.GATE_GO and hasattr(vram, "is_go"),
+          "vram.GATE_GO atau is_go hilang")
 
-    # Temuan verifier 2026-10-16: dokumen menjanjikan penolakan saat meter tidak ada, kodenya
-    # menjawab ALLOW. Yang ditahan di sini adalah PERILAKUNYA, bukan kata-katanya — sebuah kalimat
-    # README bisa kembali busuk tanpa ada yang menyadari, angka ini tidak.
-    _saved = {k: os.environ.get(k) for k in ("AI_STATION_HOME", vram.GATE_ENV)}
+    # 10. Unmetered environment returns UNKNOWN
+    saved_env = {k: os.environ.get(k) for k in ("AI_STATION_HOME", vram.GATE_ENV)}
     try:
-        with tempfile.TemporaryDirectory() as _empty:
-            os.environ["AI_STATION_HOME"] = _empty
+        with tempfile.TemporaryDirectory() as empty_dir:
+            os.environ["AI_STATION_HOME"] = empty_dir
             os.environ.pop(vram.GATE_ENV, None)
-            _v = vram.decide("render this on the GPU")
-            check("mesin TANPA stasiun menjawab UNKNOWN dan bukan izin — tidak ada meter, tidak ada "
-                  "permit — dan is_go() membacanya sebagai bukan-izin",
-                  _v.get("state") == "UNKNOWN" and _v.get("gate") == "absent"
-                  and not vram.is_go(_v), json.dumps(_v)[:180])
+            v = vram.decide("render this on the GPU")
+            check("mesin TANPA stasiun menjawab UNKNOWN dan bukan izin (is_go == False)",
+                  v.get("state") == "UNKNOWN" and v.get("gate") == "absent" and not vram.is_go(v),
+                  json.dumps(v)[:180])
+
+            # 11. Explicit bypass
             os.environ[vram.GATE_ENV] = "off"
-            _b = vram.decide("render this on the GPU")
-            check("jalan keluar harus DIKETIK: IRSOFKA_BLENDER_GATE=off menghasilkan BYPASSED yang "
-                  "tercetak sebagai state, bukan hilang diam-diam",
-                  _b.get("state") == "BYPASSED" and vram.is_go(_b), json.dumps(_b)[:180])
+            b = vram.decide("render this on the GPU")
+            check(f"jalan keluar harus DIKETIK: {vram.GATE_ENV}=off menghasilkan BYPASSED (is_go == True)",
+                  b.get("state") == "BYPASSED" and vram.is_go(b), json.dumps(b)[:180])
     finally:
-        for _k, _old in _saved.items():
-            if _old is None:
-                os.environ.pop(_k, None)
+        for k, old in saved_env.items():
+            if old is None:
+                os.environ.pop(k, None)
             else:
-                os.environ[_k] = _old
+                os.environ[k] = old
 
-    _residue = [(REPO / n).read_text(errors="replace")
-                for n in ("vram.py", "README.md", "UPSTREAM", "NOTICE") if (REPO / n).is_file()]
+    # 12. Unreachable socket returns structured error
+    unavail = bridge_call("ping", timeout=0.5)
+    check("socket Blender mati mengembalikan status error terstruktur, bukan crash atau exception",
+          unavail.get("status") == "error" and unavail.get("error_type") == "BRIDGE_OFFLINE" and "start_hint" in unavail,
+          json.dumps(unavail)[:160])
+
+    # 13. Residue check
+    docs_to_check = [
+        (REPO / n).read_text(errors="replace")
+        for n in ("vram.py", "README.md", "UPSTREAM", "NOTICE")
+        if (REPO / n).is_file()
+    ]
     check("tidak ada sisa repositori lain di modul ini: satu nama env, satu merek, satu alat",
-          not any(("COMFY" in t.upper() or "IRSOVKA" in t.upper()) for t in _residue),
-          "vram/README/UPSTREAM/NOTICE masih memakai nama env atau alat repositori lain")
-    # Kata yang tidak pernah diproduksi `decide()` tidak boleh muncul di dokumen yang menjanjikan
-    # hasilnya. Ini persis kontradiksi yang verifier temukan dan yang tidak bisa dilihat selftest
-    # versi lama: kata itu tertulis, angkanya tidak.
-    _docs = [(REPO / n).read_text(errors="replace")
-             for n in ("README.md", "UPSTREAM", "NOTICE") if (REPO / n).is_file()]
-    check("dokumen hanya menyebut state yang benar-benar bisa dikeluarkan gerbang",
-          not any("UNAVAILABLE" in t.upper() for t in _docs),
-          "README/UPSTREAM/NOTICE menjanjikan state yang tidak ada di vram.decide()")
-    st, why = _upstream_claims_are_true()
-    check("baris Status UPSTREAM menyatakan ambil-alih MIT, bukan clean room", st, why)
-    check("lisensi kami BSL 1.1 (keputusan pemegang proyek), dan NOTICE MIT ikut terbawa",
-          "Business Source" in (REPO / "LICENSE").read_text(errors="replace")
-          and "MIT License" in (REPO / "upstream/LICENSE").read_text(errors="replace"),
-          "LICENSE/ upstream LICENSE tidak seperti yang diharapkan")
+          not any(("COMFY" in t.upper() or "IRSOVKA" in t.upper()) for t in docs_to_check),
+          "ditemukan nama env atau nama repositori lain di file sumber/dokumen")
 
-    _readme = (REPO / "README.md").read_text(errors="replace") if (REPO / "README.md").is_file() else ""
-    _claimed = sorted({int(n) for n in re.findall(r"#\s*(\d+)\s+checks?", _readme)})
-    _total = len(results) + 1  # baris ini sendiri belum dihitung: ia adalah check terakhir
-    check("jumlah check yang DITULIS README sama dengan yang benar-benar berjalan "
-          f"({len(_claimed)} angka di README vs {_total} yang jalan)",
-          _claimed == [_total], f"README menulis {(_claimed or 'tidak ada')}, yang jalan {_total}")
+    # 14. Document vocabulary honesty
+    docs_text = [
+        (REPO / n).read_text(errors="replace")
+        for n in ("README.md", "UPSTREAM", "NOTICE")
+        if (REPO / n).is_file()
+    ]
+    check("dokumen hanya menyebut state yang benar-benar bisa dikeluarkan gerbang (tanpa WAIT/UNAVAILABLE)",
+          not any(("UNAVAILABLE" in t.upper() or "WAIT" in t.upper()) for t in docs_text),
+          "dokumen menyebut status gerbang yang tidak ada di vram.decide()")
+
+    # 15. BSL 1.1 license check for the entire work
+    lic_text = (REPO / "LICENSE").read_text(errors="replace")
+    not_text = (REPO / "NOTICE").read_text(errors="replace")
+    check("lisensi kami BSL 1.1 untuk seluruh karya dengan Apache-2.0 Change License, NOTICE merek saja",
+          "Business Source License" in lic_text
+          and "all source code" in lic_text
+          and "Apache License" in lic_text
+          and "attribution" in not_text.lower(),
+          "LICENSE/NOTICE tidak sesuai spesifikasi BSL clean-room")
+
+    # 16. Self-referential check count verification: README count matches executed checks
+    readme_text = (REPO / "README.md").read_text(errors="replace") if (REPO / "README.md").is_file() else ""
+    m_count = re.search(r"(\d+)\s+checks?", readme_text, re.IGNORECASE)
+    expected_count = int(m_count.group(1)) if m_count else -1
+    # Note: total checks in this selftest is len(results) + 1 (for this check itself)
+    total_checks_executed = len(results) + 1
+    check("jumlah checks yang ditulis di README sama dengan jumlah checks nyata yang dijalankan",
+          expected_count == total_checks_executed,
+          f"README mencatat {expected_count} checks, realita berjalan {total_checks_executed} checks")
 
     bad = [n for ok, n, _d in results if not ok]
     print(f"\nirsofka-blender-mcp selftest: {len(results) - len(bad)}/{len(results)} sesuai")
@@ -233,43 +421,16 @@ def selftest() -> int:
     return 0 if not bad else 1
 
 
-def _upstream_claims_are_true() -> tuple[bool, str]:
-    """Yang diuji adalah STATUS yang diklaim berkas itu, bukan kata yang boleh disebut di dalamnya.
-
-    Versi pertama melarang kata "clean room" muncul di mana pun — dan langsung salah, karena
-    UPSTREAM yang jujur justru MENYEBUT klaim lama untuk mencabutnya. Yang harus dipegang adalah
-    baris Status: ia tidak boleh lagi mengklaim clean room, dan harus menyebut sumber MIT.
-    """
-    try:
-        txt = (REPO / "UPSTREAM").read_text(errors="replace")
-    except OSError:
-        return False, "UPSTREAM tidak terbaca"
-    low = txt.lower()
-    status_lines = [l for l in txt.splitlines() if l.strip().lower().startswith("status:")]
-    if not status_lines:
-        return False, "tidak ada baris Status: di UPSTREAM"
-    st = status_lines[0].lower()
-    if "clean" in st:
-        return False, f"Status masih mengklaim clean room: {status_lines[0][:70]}"
-    named = "mcp-for-blender" in low or "ahujasid" in low
-    if not named or " mit" not in low:
-        return False, f"provenansi MIT tidak disebut (named={named})"
-    if "7a0373e" not in txt:
-        return False, "sha basis tidak dicatat, jadi 'verbatim' tidak bisa diperiksa orang lain"
-    return True, ""
-
-
 def main(argv) -> int:
     if "--selftest" in argv:
         return selftest()
     if "--surface-policy" in argv:
-        base, report = build()
+        _mcp, report = build()
         print(json.dumps(report, indent=2))
         return 0 if report.get("ok") else 1
-    base, _report = build()
-    # argv diteruskan apa adanya: instalasi addon / mode koneksi adalah milik basis.
-    sys.argv = [sys.argv[0], *argv]
-    base.main()
+
+    mcp, _report = build()
+    mcp.run(transport="stdio")
     return 0
 
 

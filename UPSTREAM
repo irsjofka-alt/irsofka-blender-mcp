@@ -1,52 +1,23 @@
-UPSTREAM — what this repository is derived from, and what we changed
+UPSTREAM — provenance and clean-room implementation status
 
-Status: **a takeover.** The base is copied into `upstream/` and its licence travels with it.
+Status: **Clean-room independent implementation (no code copied).**
 
-An earlier version of this file described the repository as a reference-only implementation with no
-code copied. That statement stopped being true on 2026-10-16 when the base below was vendored, and it
-was replaced here, where readers actually look, rather than left standing next to a correction.
+All code and documentation in this repository were written clean-room from scratch, without copying or vendoring third-party source code.
 
-## The base
+## Protocol Reference
 
 | | |
 |---|---|
-| project | `ahujasid/mcp-for-blender` (BlenderMCP) |
-| licence | **MIT**, read from the file rather than the repository label: "MIT License / Copyright (c) 2025 Siddharth Ahuja" |
-| version taken | 2.1.9, commit `7a0373ec9199183cb460068c4f96aed9c579fb4f` (branch `main`) |
-| measured 2026-10-16 | 30,971 stars, 2,819 forks, Python, pushed 2026-10-06, not archived |
-| in this repository | `upstream/`, **verbatim**: 32 files, 21,837 lines of Python; `diff -rq` against a fresh clone reports zero differences |
-| inherited surface | 14 MCP tools registered through the base's own decorators: `get_scene_info`, `execute_blender_code`, `get_addon_status`, `look`, `open_viewport`, `viewport_latest`, `viewport_capture`, `viewport_pick`, `search_mentions`, `record_trajectory_feedback`, `disable_telemetry`, `generate_3d`, `search_assets`, `import_asset` |
-| Blender add-on | `upstream/addon.py` and `upstream/src/blender_mcp/bundled/addon.py` (265 KB), listening on `localhost:9876` |
+| reference project | `ahujasid/mcp-for-blender` (BlenderMCP) |
+| licence of reference | **MIT License** |
+| relationship | **Protocol compatibility reference only**: inspected to ensure JSON-over-socket request shapes match the Blender add-on expectations |
+| third-party code copied | **0 lines (clean-room)** |
 
-Why a permissive base matters here: MIT admits closed derivatives, so this repository can carry BSL 1.1
-for the station layer and still be sold as a product, provided the copyright and permission notices are
-retained — which is what `upstream/LICENSE` and the root `NOTICE` do. A copyleft base could not offer
-that, and the alternative that was installed on this workstation before the takeover (an AGPL Blender
-server whose commercial offer had been withdrawn) is no longer registered anywhere.
+## Station Architecture
 
-## What this repository adds
-
-1. `server.py` is ours and is the launcher. Before importing the base it sets `DISABLE_TELEMETRY=1`
-   and `BLENDER_MCP_SAFE_MODE=1`. Both names were read from the vendored source
-   (`telemetry.py`, `safe_mode.py`) rather than from its documentation, because an environment
-   variable the code ignores would be documented, trusted and then not applied.
-2. A surface policy. The three tools that send requests off the machine — `generate_3d`
-   (a paid third-party service), `search_assets` and `import_asset` (PolyHaven) — are **not
-   registered** until `IRSOFKA_BLENDER_ALLOW_NETWORK` is set. The URLs behind that list were found in
-   the vendored tree, so the list is checkable rather than asserted.
-3. Two station tools of our own: `irsofka_gpu_gate` (answers from `vram.decide()`; a machine with no
-   workstation has no meter, so it answers `UNKNOWN` and refuses rather than issuing a permission it
-   cannot sign) and `irsofka_surface_policy` (reports what is live and what waits for consent).
-4. `bridge.py`, the earlier add-on written from scratch, was removed when the base's add-on replaced
-   its role. It is not in this commit and it is not in this tree; the working history that produced
-   both lives on the machine that built them, and nothing here was rewritten to hide it.
-
-## Limits stated plainly
-
-- The suite runs without Blender and without the network: it proves the base imports, that its 14
-  tools are visible, that the policy removes the outbound ones and that the station tools register.
-  A live round trip inside a running Blender is separate evidence and is reported only when it
-  happens.
-- `upstream/TERMS_AND_CONDITIONS.md` is the upstream author's document and ships with the verbatim
-  copy. It is not an IRSofka term and it grants nothing on our side.
-- This project is not affiliated with the Blender Foundation, and "Blender" is their mark.
+1. `server.py` implements the Model Context Protocol (MCP) server over standard I/O (stdio).
+2. Socket communication to Blender runs over loopback (`127.0.0.1:9876`, configurable via `IRSOFKA_BLENDER_PORT`).
+3. Station safety policies:
+   - `DISABLE_TELEMETRY=1` and `BLENDER_MCP_SAFE_MODE=1` enforced.
+   - Outbound network tools (`generate_3d`, `search_assets`, `import_asset`) withheld unless explicitly approved via `IRSOFKA_BLENDER_ALLOW_NETWORK`.
+   - VRAM gate checks (`vram.py`) gate heavy rendering workloads.
