@@ -9,7 +9,7 @@ No third-party code is vendored or copied: the protocol was implemented from the
 
 ```bash
 $ python3 server.py --surface-policy  # what is registered right now, and what is pending consent
-$ python3 server.py --selftest        # 16 checks, no Blender running, no network out
+$ python3 server.py --selftest        # 19 checks, no Blender running, no network out
 ```
 
 ## Architecture and Safety Policies

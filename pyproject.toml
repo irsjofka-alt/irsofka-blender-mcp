@@ -1,39 +1,53 @@
+# IRSofka Blender MCP — packaging metadata.
+#
+# Rewritten 2026-10-16 after the clean-room rewrite deleted `upstream/`. The version before this
+# comment declared a package at `upstream/src/blender_mcp`, a `description` crediting the MIT base
+# as "taken over", and a dependency (`httpx`) that no shipped file imports. A verifier found all
+# three by reading the manifest against the file list; metadata that describes a tree that no longer
+# exists is not stale documentation, it is a build that fails and a licence claim that is untrue.
+# What is declared below is what `git ls-files` and the import scan can both confirm.
+
 [project]
 name = "irsofka-blender-mcp"
-version = "0.2.1"
-description = "IRSofka Blender MCP — the MIT BlenderMCP base taken over, gated by the station, and answered honestly when Blender is not there."
+version = "0.3.0"
+description = "IRSofka Blender MCP — a clean-room MCP server for a self-run Blender session, gated by the workstation's VRAM meter, that answers UNAVAILABLE instead of inventing a result."
 requires-python = ">=3.10"
-# The base is not stdlib-only, and pretending otherwise is how an install "succeeds" and then
-# fails at first import. Versions mirror upstream's own constraint so the vendored code is the
-# code we tested, not a moving target.
+# Read from what the shipped modules import, measured by `tools/deps_honesty.py` and asserted by
+# the selftest, not carried over from the base this work replaced. `mcp` is the protocol library;
+# every other import in server.py and vram.py is stdlib.
 dependencies = [
   "mcp>=1.26.0,<2",
-  "httpx>=0.27.0",
 ]
 license = "BUSL-1.1"
-# The vendored MIT tree keeps its own licence; NOTICE names both, and packaging has to carry both
-# files or a recipient gets a licence claim without the exception written next to it.
+# Both files travel with the work: LICENSE holds the BSL grant and its Change Date/Change License
+# parameters, NOTICE holds the trade-mark attribution. Neither names a third-party code licence,
+# because no third-party code is distributed here.
 license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "PT IRSofka Data Teknologi", email = "admin@irsofka.co.id" }]
+keywords = ["blender", "mcp", "model-context-protocol", "vram", "3d"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
 
-# No console script, and no top-level `py-modules` install: dropping modules named `server` and
-# `vram` into site-packages would claim two of the most collision-prone names in Python for a server
-# that is meant to be run from a checkout. The base is packaged below because it is a real package
-# (`blender_mcp`) with a namespaced path; our layer stays where it is.
+[project.urls]
+Homepage = "https://irsofka.co.id"
+Issues = "https://irsofka.co.id"
+Support = "admin@irsofka.co.id"
 
+# There is no installable package in this tree. The old `[tool.setuptools]` block pointed at the
+# deleted `upstream/` package; with that gone there is nothing to install, and a wheel that installs
+# no module is a quieter failure than no wheel at all. `py-modules = []` is kept deliberately:
+# without an explicit empty list setuptools auto-discovers the root files and would put modules
+# named `server` and `vram` — two of the most collision-prone names in Python — at the top level of
+# site-packages. The supported way to run this is `python3 server.py` from a checkout, which is also
+# what the workstation's MCP registration points at.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# `bridge` is gone: the clean-room add-on was deleted when the MIT base was taken over, and a
-# py-modules list naming a missing file is a wheel that cannot be built. The list must match
-# `git ls-files`, and it does.
-# `py-modules = []` is not decoration: without it setuptools auto-discovers the root modules and puts
-# `server.py` and `vram.py` at the top level of site-packages — the collision the comment above is
-# about. Declaring it empty is the explicit "we do not install these".
+packages = []
 py-modules = []
-packages = ["blender_mcp", "blender_mcp.bundled"]
-package-dir = {"blender_mcp" = "upstream/src/blender_mcp"}
-
-[tool.setuptools.package-data]
-blender_mcp = ["apps/*.html", "guides/*.md"]
