@@ -1,0 +1,55 @@
+# IRSofka Blender MCP — packaging metadata.
+#
+# Rewritten after the independent implementation deleted `upstream/`. The version before this
+# comment declared a package at `upstream/src/blender_mcp`, an obsolete description, and a
+# dependency (`httpx`) that no shipped file imports. An audit found these by reading the
+# manifest against the file list; metadata that describes a tree that no longer exists is not
+# stale documentation, it is a build that fails and a licence claim that is untrue.
+# What is declared below is what `git ls-files` and the import scan can both confirm.
+
+[project]
+name = "irsofka-blender-mcp"
+version = "0.3.0"
+description = "IRSofka Blender MCP — an MCP server for a self-run Blender session, gated by the workstation's VRAM meter, that answers UNAVAILABLE instead of inventing a result."
+requires-python = ">=3.10"
+# Read from what the shipped modules import, measured by `tools/deps_honesty.py` and asserted by
+# the selftest, not carried over from the base this work replaced. `mcp` is the protocol library;
+# every other import in server.py and vram.py is stdlib.
+dependencies = [
+  "mcp>=1.26.0,<2",
+]
+license = "BUSL-1.1"
+# Both files travel with the work: LICENSE holds the BSL grant and its Change Date/Change License
+# parameters, NOTICE holds the trade-mark attribution. Neither names a third-party code licence,
+# because no third-party code is distributed here.
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "PT IRSofka Data Teknologi", email = "admin@irsofka.co.id" }]
+keywords = ["blender", "mcp", "model-context-protocol", "vram", "3d"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://irsofka.co.id"
+Issues = "https://irsofka.co.id"
+Support = "admin@irsofka.co.id"
+
+# There is no installable package in this tree. The old `[tool.setuptools]` block pointed at the
+# deleted `upstream/src/blender_mcp`, which is the kind of error an import scan cannot see and a
+# build finds first — `tools/deps_honesty.py` now names any path the config references that is not
+# there. With nothing left to package, `packages` and `py-modules` are declared empty on purpose:
+# without an explicit empty list setuptools auto-discovers the root files and would put modules
+# named `server` and `vram` — two of the most collision-prone names in Python — at the top level of
+# site-packages. What an empty build actually produces was not measured here (this machine has no
+# importable setuptools), so no claim is made about it; the supported way to run this work is
+# `python3 server.py` from a checkout, which is also what the workstation's MCP registration uses.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+py-modules = []

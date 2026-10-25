@@ -1,0 +1,91 @@
+UPSTREAM — provenance and independent implementation status
+
+Status: **Independent implementation (no code copied).**
+
+All code and documentation in this repository were written independent from scratch, without copying or vendoring third-party source code.
+
+## Protocol Reference
+
+| | |
+|---|---|
+| reference project | `ahujasid/mcp-for-blender` (BlenderMCP) |
+| licence of reference | **MIT License** |
+| relationship | **Protocol compatibility reference only**: inspected to ensure JSON-over-socket request shapes match the Blender add-on expectations |
+| third-party code copied | **0 lines (independent)** |
+
+## Station Architecture
+
+1. `server.py` implements the Model Context Protocol (MCP) server over standard I/O (stdio).
+2. Socket communication to Blender runs over loopback (`127.0.0.1:9876`, configurable via `IRSOFKA_BLENDER_PORT`).
+3. Station safety policies:
+   - `DISABLE_TELEMETRY=1` and `BLENDER_MCP_SAFE_MODE=1` enforced.
+   - Outbound network tools (`generate_3d`, `search_assets`, `import_asset`) withheld unless explicitly approved via `IRSOFKA_BLENDER_ALLOW_NETWORK`.
+   - VRAM gate checks (`vram.py`) gate heavy rendering workloads.
+
+## Measured overlap against the base this server replaced
+
+The vendored base is gone from this tree — the server was rewritten independent — but it is still
+reachable in this repository's own history at commit `19c7bbf`, so every figure below can be reproduced
+without leaving the repository:
+
+```
+python3 tools/cleanroom_overlap.py 19c7bbf
+```
+
+The tool's output, pasted verbatim rather than retyped:
+
+```
+base 19c7bbf:upstream/  files=20  lines=17265
+
+server.py: 345 lines | block-shared 35 (10.1%) | exact-line duplicates 65 | longest identical run 4 | identifiers also in base 59/113
+   identical run of 4 lines (at new-file line ~14):
+       | import json
+       | import logging
+       | import os
+       | import re
+   identical run of 2 lines (at new-file line ~11):
+       | """
+       | from __future__ import annotations
+   identical run of 2 lines (at new-file line ~74):
+       | break
+       | chunks.append(chunk)
+   shared identifiers: 59 total, of which 12 are names the BASE DEFINED at module level (DEFAULT_HOST, DEFAULT_PORT, build, execute_blender_code, generate_3d, get, get_scene_info, import_asset, logger, main, mcp, search_assets)
+   the rest are vocabulary in use, not definitions: IGNORECASE, INFO, JSONDecodeError, __name__, append, argv, basicConfig, chunk, chunks, decode, dumps, encode, environ, exists, export_scene, getLogger
+   most repeated duplicate lines: 11x '@mcp.tool()'; 6x '}'; 6x 'try:'; 4x 'return {'; 3x '"""'; 3x ']'
+
+vram.py: 80 lines | block-shared 9 (11.2%) | exact-line duplicates 10 | longest identical run 2 | identifiers also in base 14/26
+   identical run of 2 lines (at new-file line ~16):
+       | """
+       | from __future__ import annotations
+   identical run of 2 lines (at new-file line ~18):
+       | import os
+       | import sys
+   shared identifiers: 14 total, of which 1 are names the BASE DEFINED at module level (get)
+   the rest are vocabulary in use, not definitions: environ, expanduser, home, insert, is_file, lower, mode, override, path, root, setdefault, strip, tools
+   most repeated duplicate lines: 2x '"""'; 2x 'try:'; 1x 'from __future__ import annotations'; 1x 'import os'; 1x 'import sys'; 1x 'from pathlib import Path'
+```
+- **Deliberate matches are named, not buried.** The base-defined names that coincide include the
+  MCP tool names (`execute_blender_code`, `get_scene_info`, `generate_3d`, `search_assets`,
+  `import_asset`) and the protocol's `DEFAULT_HOST` / `DEFAULT_PORT`. Those are kept on purpose:
+  they are the API every calling engine already uses, and renaming them would break callers for
+  no gain. An overlap that was hidden is a finding; one that is declared is a design choice.
+
+How to read it, stated by the shape of the numbers rather than by claim:
+
+- **Longest identical run.** The lines that match longest are `import` statements. That is what a
+  reimplementation written against a protocol produces; a rewritten copy produces runs of logic.
+- **Exact-line duplicates** are punctuation: the `@mcp.tool()` decorator repeated once per registered
+  tool, then braces, `try:`, `return {` and docstring delimiters.
+- **Identifiers are split into the two kinds that matter** — names the base DEFINED at module level,
+  which can indict a rewrite, versus names merely USED, which are standard-library and protocol
+  vocabulary. The tool prints the counts and the names apart, so a percentage cannot hide inside a
+  percentage.
+- The tool deliberately excludes its own file from the measurement: comparing the measuring script
+  to the base yields a number about this repository's tooling, not about the server.
+
+**What this does not prove.** Line and name identity measure text. An independent implementation is a claim about
+process — that nobody read the base while this was written — and no diff can establish that; it can
+only fail it. That is why the runs and the duplicate strings are published in full instead of being
+summarised into a single figure someone would have to trust. The upstream project and its author stay
+named as what they are: the owner of the protocol's other end under its own licence, and not the
+author of this file.
